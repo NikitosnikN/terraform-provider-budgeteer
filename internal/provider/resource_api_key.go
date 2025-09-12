@@ -15,12 +15,17 @@ import (
 
 // OpenRouter API key structures
 type OpenRouterKeyResponse struct {
+	Data OpenRouterKey `json:"data"`
+	Key  string        `json:"key,omitempty"` // Only returned on creation
+}
+
+type OpenRouterKeyListResponse struct {
 	Data []OpenRouterKey `json:"data"`
 }
 
 type OpenRouterKey struct {
 	CreatedAt          string  `json:"created_at"`
-	UpdatedAt          string  `json:"updated_at"`
+	UpdatedAt          *string `json:"updated_at"` // Can be null
 	Hash               string  `json:"hash"`
 	Label              string  `json:"label"`
 	Name               string  `json:"name"`
@@ -28,7 +33,6 @@ type OpenRouterKey struct {
 	Limit              float64 `json:"limit"`
 	Usage              float64 `json:"usage"`
 	IncludeByokInLimit *bool   `json:"include_byok_in_limit,omitempty"`
-	Key                string  `json:"key,omitempty"` // Only returned on creation
 }
 
 type CreateKeyRequest struct {
@@ -153,11 +157,7 @@ func resourceApiKeyCreate(ctx context.Context, d *schema.ResourceData, m interfa
 		return diag.FromErr(err)
 	}
 
-	if len(keyResp.Data) == 0 {
-		return diag.Errorf("No API key returned from creation request")
-	}
-
-	key := keyResp.Data[0]
+	key := keyResp.Data
 	d.SetId(key.Hash)
 
 	// Set all the attributes
@@ -168,11 +168,14 @@ func resourceApiKeyCreate(ctx context.Context, d *schema.ResourceData, m interfa
 	d.Set("limit", key.Limit)
 	d.Set("usage", key.Usage)
 	d.Set("created_at", key.CreatedAt)
-	d.Set("updated_at", key.UpdatedAt)
 
-	// The key value is only returned on creation
-	if key.Key != "" {
-		d.Set("key_value", key.Key)
+	if key.UpdatedAt != nil {
+		d.Set("updated_at", *key.UpdatedAt)
+	}
+
+	// The key value is only returned on creation and is at the root level
+	if keyResp.Key != "" {
+		d.Set("key_value", keyResp.Key)
 	}
 
 	if key.IncludeByokInLimit != nil {
@@ -218,13 +221,7 @@ func resourceApiKeyRead(ctx context.Context, d *schema.ResourceData, m interface
 		return diag.FromErr(err)
 	}
 
-	if len(keyResp.Data) == 0 {
-		// Key doesn't exist, remove from state
-		d.SetId("")
-		return nil
-	}
-
-	key := keyResp.Data[0]
+	key := keyResp.Data
 
 	// Update all the attributes
 	d.Set("hash", key.Hash)
@@ -234,7 +231,10 @@ func resourceApiKeyRead(ctx context.Context, d *schema.ResourceData, m interface
 	d.Set("limit", key.Limit)
 	d.Set("usage", key.Usage)
 	d.Set("created_at", key.CreatedAt)
-	d.Set("updated_at", key.UpdatedAt)
+
+	if key.UpdatedAt != nil {
+		d.Set("updated_at", *key.UpdatedAt)
+	}
 
 	if key.IncludeByokInLimit != nil {
 		d.Set("include_byok_in_limit", *key.IncludeByokInLimit)

@@ -16,15 +16,63 @@ jobs:
         with:
           fetch-depth: 0
       - name: Auto Tag
+        id: tag
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           git fetch --tags
+          
+          # Get the latest tag, default to v0.0.0 if no tags exist
           latest_tag=$(git describe --tags `git rev-list --tags --max-count=1` 2>/dev/null || echo "v0.0.0")
-          current_commit=$(git rev-parse HEAD)
-          if ! git rev-parse "v1.0.9" >/dev/null 2>&1; then
-            git tag -a "v1.0.9" $current_commit -m "Release v1.0.9"
-            git push origin "v1.0.9"
+          echo "Latest tag: $latest_tag"
+          
+          # Check if there are changes since the last tag
+          if [ "$latest_tag" != "v0.0.0" ]; then
+            changes=$(git rev-list ${latest_tag}..HEAD --count)
+            echo "Changes since $latest_tag: $changes commits"
+            if [ "$changes" -eq "0" ]; then
+              echo "No changes since last tag, skipping release..."
+              exit 0
+            fi
+          fi
+          
+          # Extract version numbers (remove 'v' prefix)
+          version=${latest_tag#v}
+          IFS='.' read -ra VERSION_PARTS <<< "$version"
+          
+          # Default to 0.0.0 if parsing fails
+          major=${VERSION_PARTS[0]:-0}
+          minor=${VERSION_PARTS[1]:-0}
+          patch=${VERSION_PARTS[2]:-0}
+          
+          echo "Current version: $major.$minor.$patch"
+          
+          # Increment patch version
+          new_patch=$((patch + 1))
+          new_version="v$major.$minor.$new_patch"
+          
+          echo "New version: $new_version"
+          
+          # Check if tag already exists
+          if git rev-parse "$new_version" >/dev/null 2>&1; then
+            echo "Tag $new_version already exists, skipping..."
+          else
+            echo "Creating new tag: $new_version"
+            
+            # Generate changelog
+            echo "## Changelog" > changelog.md
+            if [ "$latest_tag" != "v0.0.0" ]; then
+              git log ${latest_tag}..HEAD --oneline --pretty=format:"- %s" >> changelog.md
+            else
+              git log --oneline --pretty=format:"- %s" >> changelog.md
+            fi
+            
+            echo "Changelog:"
+            cat changelog.md
+            
+            git tag -a "$new_version" -m "Release $new_version"
+            git push origin "$new_version"
+            echo "new_version=$new_version" >> $GITHUB_OUTPUT
           fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -45,6 +93,7 @@ jobs:
 
       
       - name: Run GoReleaser
+        if: steps.tag.outputs.new_version != ''
         uses: goreleaser/goreleaser-action@v4
         with:
           version: latest
