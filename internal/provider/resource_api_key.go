@@ -1,15 +1,47 @@
 package provider
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
-	"strings"
+	"time"
 
 	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 )
+
+// OpenRouter API key structures
+type OpenRouterKeyResponse struct {
+	Data []OpenRouterKey `json:"data"`
+}
+
+type OpenRouterKey struct {
+	CreatedAt          string  `json:"created_at"`
+	UpdatedAt          string  `json:"updated_at"`
+	Hash               string  `json:"hash"`
+	Label              string  `json:"label"`
+	Name               string  `json:"name"`
+	Disabled           bool    `json:"disabled"`
+	Limit              float64 `json:"limit"`
+	Usage              float64 `json:"usage"`
+	IncludeByokInLimit *bool   `json:"include_byok_in_limit,omitempty"`
+	Key                string  `json:"key,omitempty"` // Only returned on creation
+}
+
+type CreateKeyRequest struct {
+	Name  string  `json:"name"`
+	Label string  `json:"label,omitempty"`
+	Limit float64 `json:"limit,omitempty"`
+}
+
+type UpdateKeyRequest struct {
+	Name               *string `json:"name,omitempty"`
+	Disabled           *bool   `json:"disabled,omitempty"`
+	IncludeByokInLimit *bool   `json:"include_byok_in_limit,omitempty"`
+}
 
 func resourceApiKey() *schema.Resource {
 	return &schema.Resource{
@@ -19,30 +51,57 @@ func resourceApiKey() *schema.Resource {
 		DeleteContext: resourceApiKeyDelete,
 		Schema: map[string]*schema.Schema{
 			"name": {
-				Type:     schema.TypeString,
-				Required: true,
+				Type:        schema.TypeString,
+				Required:    true,
+				Description: "The name of the API key",
+			},
+			"label": {
+				Type:        schema.TypeString,
+				Optional:    true,
+				Description: "Optional label for the API key",
+			},
+			"limit": {
+				Type:        schema.TypeFloat,
+				Optional:    true,
+				Description: "Credit limit for the API key",
+			},
+			"disabled": {
+				Type:        schema.TypeBool,
+				Optional:    true,
+				Default:     false,
+				Description: "Whether the API key is disabled",
+			},
+			"include_byok_in_limit": {
+				Type:        schema.TypeBool,
+				Optional:    true,
+				Description: "Whether to include BYOK usage in the limit",
+			},
+			// Computed fields
+			"hash": {
+				Type:        schema.TypeString,
+				Computed:    true,
+				Description: "The hash identifier of the API key",
 			},
 			"key_value": {
-				Type:      schema.TypeString,
-				Computed:  true,
-				Sensitive: true,
+				Type:        schema.TypeString,
+				Computed:    true,
+				Sensitive:   true,
+				Description: "The actual API key value (only available on creation)",
 			},
-			"budget": {
-				Type:     schema.TypeInt,
-				Optional: true,
-				Default:  -1,
-			},
-			"costs": {
-				Type:     schema.TypeFloat,
-				Computed: true,
+			"usage": {
+				Type:        schema.TypeFloat,
+				Computed:    true,
+				Description: "Current usage of the API key",
 			},
 			"created_at": {
-				Type:     schema.TypeString,
-				Computed: true,
+				Type:        schema.TypeString,
+				Computed:    true,
+				Description: "Creation timestamp",
 			},
-			"last_used_at": {
-				Type:     schema.TypeString,
-				Computed: true,
+			"updated_at": {
+				Type:        schema.TypeString,
+				Computed:    true,
+				Description: "Last update timestamp",
 			},
 		},
 	}
@@ -51,225 +110,192 @@ func resourceApiKey() *schema.Resource {
 func resourceApiKeyCreate(ctx context.Context, d *schema.ResourceData, m interface{}) diag.Diagnostics {
 	client := m.(*apiClient)
 
-	name := d.Get("name").(string)
-	budget := d.Get("budget").(int)
+	createReq := CreateKeyRequest{
+		Name: d.Get("name").(string),
+	}
 
-	// Check if the API key already exists
-	url := fmt.Sprintf("%s/keyView", client.host)
-	req, err := http.NewRequest("GET", url, nil)
+	if label, ok := d.GetOk("label"); ok {
+		createReq.Label = label.(string)
+	}
+
+	if limit, ok := d.GetOk("limit"); ok {
+		createReq.Limit = limit.(float64)
+	}
+
+	jsonData, err := json.Marshal(createReq)
 	if err != nil {
 		return diag.FromErr(err)
 	}
 
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", client.apiKey))
-
-	r, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return diag.FromErr(err)
-	}
-	defer r.Body.Close()
-
-	var existingKeys []map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&existingKeys); err != nil {
-		return diag.FromErr(err)
-	}
-
-	// Check if key with same name exists
-	for _, key := range existingKeys {
-		if key["name"].(string) == name {
-			// Key exists, import it into our state
-			keyID := fmt.Sprint(int(key["id"].(float64)))
-			d.SetId(keyID)
-
-			// If budget has changed, update it
-			existingBudget := int(key["budget"].(float64))
-			if budget != existingBudget {
-				if err := updateKeyBudget(client, keyID, float64(budget)); err != nil {
-					return diag.FromErr(err)
-				}
-			}
-
-			// Read the state to ensure it's up to date
-			return resourceApiKeyRead(ctx, d, m)
-		}
-	}
-
-	// Create new key if it doesn't exist
-	payload := map[string]interface{}{
-		"name":   name,
-		"budget": float64(budget),
-	}
-
-	jsonPayload, err := json.Marshal(payload)
+	url := fmt.Sprintf("%s/keys", client.baseURL)
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return diag.FromErr(err)
 	}
 
-	url = fmt.Sprintf("%s/key", client.host)
-	req, err = http.NewRequest("POST", url, strings.NewReader(string(jsonPayload)))
-	if err != nil {
-		return diag.FromErr(err)
-	}
-
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", client.provisioningAPIKey))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", client.apiKey))
 
-	r, err = http.DefaultClient.Do(req)
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return diag.FromErr(err)
 	}
-	defer r.Body.Close()
+	defer resp.Body.Close()
 
-	if r.StatusCode != http.StatusCreated {
-		return diag.Errorf("failed to create API key, status: %d", r.StatusCode)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		return diag.Errorf("Failed to create API key: %s - %s", resp.Status, string(body))
 	}
 
-	var response map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&response); err != nil {
+	var keyResp OpenRouterKeyResponse
+	if err := json.NewDecoder(resp.Body).Decode(&keyResp); err != nil {
 		return diag.FromErr(err)
 	}
-	// Set the ID and key_value immediately after creation
-	d.SetId(fmt.Sprint(int(response["id"].(float64))))
-	if keyValue, ok := response["key"].(string); ok {
-		if err := d.Set("key_value", keyValue); err != nil {
-			return diag.FromErr(err)
-		}
+
+	if len(keyResp.Data) == 0 {
+		return diag.Errorf("No API key returned from creation request")
 	}
 
-	// Read the resource to ensure all other state is fully populated
-	return resourceApiKeyRead(ctx, d, m)
+	key := keyResp.Data[0]
+	d.SetId(key.Hash)
+
+	// Set all the attributes
+	d.Set("hash", key.Hash)
+	d.Set("name", key.Name)
+	d.Set("label", key.Label)
+	d.Set("disabled", key.Disabled)
+	d.Set("limit", key.Limit)
+	d.Set("usage", key.Usage)
+	d.Set("created_at", key.CreatedAt)
+	d.Set("updated_at", key.UpdatedAt)
+
+	// The key value is only returned on creation
+	if key.Key != "" {
+		d.Set("key_value", key.Key)
+	}
+
+	if key.IncludeByokInLimit != nil {
+		d.Set("include_byok_in_limit", *key.IncludeByokInLimit)
+	}
+
+	return nil
 }
 
 func resourceApiKeyRead(ctx context.Context, d *schema.ResourceData, m interface{}) diag.Diagnostics {
 	client := m.(*apiClient)
+	keyHash := d.Id()
 
-	var diags diag.Diagnostics
-
-	// First try to get the key from /keyView endpoint
-	url := fmt.Sprintf("%s/keyView", client.host)
+	url := fmt.Sprintf("%s/keys/%s", client.baseURL, keyHash)
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return diag.FromErr(err)
 	}
 
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", client.apiKey))
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", client.provisioningAPIKey))
+	req.Header.Set("Content-Type", "application/json")
 
-	r, err := http.DefaultClient.Do(req)
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return diag.FromErr(err)
 	}
-	defer r.Body.Close()
+	defer resp.Body.Close()
 
-	var keys []map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&keys); err != nil {
-		return diag.FromErr(err)
-	}
-
-	// Find the key with matching ID
-	var foundKey map[string]interface{}
-	currentID := d.Id()
-	for _, key := range keys {
-		if fmt.Sprint(int(key["id"].(float64))) == currentID {
-			foundKey = key
-			break
-		}
-	}
-
-	if foundKey == nil {
-		// Key not found, remove it from state
+	if resp.StatusCode == http.StatusNotFound {
+		// Key doesn't exist anymore, remove from state
 		d.SetId("")
-		return diags
+		return nil
 	}
 
-	// Set all known fields from the found key
-	if err := d.Set("name", foundKey["name"]); err != nil {
-		return diag.FromErr(err)
-	}
-	if err := d.Set("budget", int(foundKey["budget"].(float64))); err != nil {
-		return diag.FromErr(err)
-	}
-	if err := d.Set("costs", foundKey["costs"].(float64)); err != nil {
-		return diag.FromErr(err)
-	}
-	if createdAt, ok := foundKey["created_at"].(string); ok {
-		if err := d.Set("created_at", createdAt); err != nil {
-			return diag.FromErr(err)
-		}
-	}
-	if lastUsedAt, ok := foundKey["last_used_at"].(string); ok {
-		if err := d.Set("last_used_at", lastUsedAt); err != nil {
-			return diag.FromErr(err)
-		}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return diag.Errorf("Failed to read API key: %s - %s", resp.Status, string(body))
 	}
 
-	// Get the full key information including key_value from /key endpoint
-	url = fmt.Sprintf("%s/key", client.host)
-	req, err = http.NewRequest("GET", url, nil)
-	if err != nil {
+	var keyResp OpenRouterKeyResponse
+	if err := json.NewDecoder(resp.Body).Decode(&keyResp); err != nil {
 		return diag.FromErr(err)
 	}
 
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", client.apiKey))
-
-	r, err = http.DefaultClient.Do(req)
-	if err != nil {
-		return diag.FromErr(err)
-	}
-	defer r.Body.Close()
-
-	var fullKeys []map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&fullKeys); err != nil {
-		return diag.FromErr(err)
+	if len(keyResp.Data) == 0 {
+		// Key doesn't exist, remove from state
+		d.SetId("")
+		return nil
 	}
 
-	// Find the matching key with the sensitive data
-	for _, key := range fullKeys {
-		if fmt.Sprint(int(key["id"].(float64))) == currentID {
-			if keyValue, ok := key["key"].(string); ok {
-				if err := d.Set("key_value", keyValue); err != nil {
-					return diag.FromErr(err)
-				}
-			}
-			break
-		}
+	key := keyResp.Data[0]
+
+	// Update all the attributes
+	d.Set("hash", key.Hash)
+	d.Set("name", key.Name)
+	d.Set("label", key.Label)
+	d.Set("disabled", key.Disabled)
+	d.Set("limit", key.Limit)
+	d.Set("usage", key.Usage)
+	d.Set("created_at", key.CreatedAt)
+	d.Set("updated_at", key.UpdatedAt)
+
+	if key.IncludeByokInLimit != nil {
+		d.Set("include_byok_in_limit", *key.IncludeByokInLimit)
 	}
 
-	return diags
+	return nil
 }
 
 func resourceApiKeyUpdate(ctx context.Context, d *schema.ResourceData, m interface{}) diag.Diagnostics {
 	client := m.(*apiClient)
+	keyHash := d.Id()
 
-	if d.HasChanges("name", "budget") {
-		budget := d.Get("budget").(int)
+	updateReq := UpdateKeyRequest{}
+	hasChanges := false
 
-		payload := map[string]interface{}{
-			"budget": float64(budget),
-		}
+	if d.HasChange("name") {
+		name := d.Get("name").(string)
+		updateReq.Name = &name
+		hasChanges = true
+	}
 
-		jsonPayload, err := json.Marshal(payload)
-		if err != nil {
-			return diag.FromErr(err)
-		}
+	if d.HasChange("disabled") {
+		disabled := d.Get("disabled").(bool)
+		updateReq.Disabled = &disabled
+		hasChanges = true
+	}
 
-		url := fmt.Sprintf("%s/key?id=%s", client.host, d.Id())
-		req, err := http.NewRequest("PUT", url, strings.NewReader(string(jsonPayload)))
-		if err != nil {
-			return diag.FromErr(err)
-		}
+	if d.HasChange("include_byok_in_limit") {
+		includeByok := d.Get("include_byok_in_limit").(bool)
+		updateReq.IncludeByokInLimit = &includeByok
+		hasChanges = true
+	}
 
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", client.apiKey))
+	if !hasChanges {
+		return resourceApiKeyRead(ctx, d, m)
+	}
 
-		r, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return diag.FromErr(err)
-		}
-		defer r.Body.Close()
+	jsonData, err := json.Marshal(updateReq)
+	if err != nil {
+		return diag.FromErr(err)
+	}
 
-		if r.StatusCode != http.StatusOK {
-			return diag.Errorf("failed to update API key")
-		}
+	url := fmt.Sprintf("%s/keys/%s", client.baseURL, keyHash)
+	req, err := http.NewRequest("PATCH", url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return diag.FromErr(err)
+	}
+
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", client.provisioningAPIKey))
+	req.Header.Set("Content-Type", "application/json")
+
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return diag.FromErr(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return diag.Errorf("Failed to update API key: %s - %s", resp.Status, string(body))
 	}
 
 	return resourceApiKeyRead(ctx, d, m)
@@ -277,90 +303,29 @@ func resourceApiKeyUpdate(ctx context.Context, d *schema.ResourceData, m interfa
 
 func resourceApiKeyDelete(ctx context.Context, d *schema.ResourceData, m interface{}) diag.Diagnostics {
 	client := m.(*apiClient)
+	keyHash := d.Id()
 
-	var diags diag.Diagnostics
-
-	url := fmt.Sprintf("%s/key?id=%s", client.host, d.Id())
+	url := fmt.Sprintf("%s/keys/%s", client.baseURL, keyHash)
 	req, err := http.NewRequest("DELETE", url, nil)
 	if err != nil {
 		return diag.FromErr(err)
 	}
 
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", client.apiKey))
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", client.provisioningAPIKey))
+	req.Header.Set("Content-Type", "application/json")
 
-	r, err := http.DefaultClient.Do(req)
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return diag.FromErr(err)
 	}
-	defer r.Body.Close()
+	defer resp.Body.Close()
 
-	if r.StatusCode != http.StatusOK {
-		return diag.Errorf("failed to delete API key")
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
+		body, _ := io.ReadAll(resp.Body)
+		return diag.Errorf("Failed to delete API key: %s - %s", resp.Status, string(body))
 	}
 
 	d.SetId("")
-
-	return diags
-}
-
-func checkKeyExists(ctx context.Context, client *apiClient, name string) (bool, string, error) {
-	url := fmt.Sprintf("%s/keyView", client.host)
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return false, "", err
-	}
-
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", client.apiKey))
-
-	r, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return false, "", err
-	}
-	defer r.Body.Close()
-
-	var response []map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&response); err != nil {
-		return false, "", err
-	}
-
-	for _, key := range response {
-		if key["name"].(string) == name {
-			return true, fmt.Sprint(key["id"]), nil
-		}
-	}
-
-	return false, "", nil
-}
-
-// Helper function to update key budget
-func updateKeyBudget(client *apiClient, keyID string, budget float64) error {
-	payload := map[string]interface{}{
-		"budget": budget,
-	}
-
-	jsonPayload, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-
-	url := fmt.Sprintf("%s/key?id=%s", client.host, keyID)
-	req, err := http.NewRequest("PUT", url, strings.NewReader(string(jsonPayload)))
-	if err != nil {
-		return err
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", client.apiKey))
-
-	r, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer r.Body.Close()
-
-	if r.StatusCode != http.StatusOK {
-		return fmt.Errorf("failed to update API key budget")
-	}
-
 	return nil
 }

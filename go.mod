@@ -1,4 +1,4 @@
-module github.com/knowit-solutions-cocreate/terraform-provider-budgeteer
+module github.com/knowit-solutions-cocreate/terraform-provider-openrouter
 
 go 1.21
 

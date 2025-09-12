@@ -10,40 +10,51 @@ import (
 func New() *schema.Provider {
 	return &schema.Provider{
 		Schema: map[string]*schema.Schema{
-			"host": {
+			"base_url": {
 				Type:        schema.TypeString,
-				Required:    true,
+				Optional:    true,
 				Sensitive:   false,
-				DefaultFunc: schema.EnvDefaultFunc("BUDGETEER_HOST", nil),
+				DefaultFunc: schema.EnvDefaultFunc("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+				Description: "The base URL for the OpenRouter API",
 			},
-			"api_key": {
+			"provisioning_api_key": {
 				Type:        schema.TypeString,
 				Required:    true,
 				Sensitive:   true,
-				DefaultFunc: schema.EnvDefaultFunc("BUDGETEER_API_KEY", nil),
+				DefaultFunc: schema.EnvDefaultFunc("OPENROUTER_PROVISIONING_API_KEY", nil),
+				Description: "The provisioning API key for OpenRouter key management",
 			},
 		},
 		ResourcesMap: map[string]*schema.Resource{
-			"budgeteer_api_key": resourceApiKey(),
+			"openrouter_api_key": resourceApiKey(),
 		},
 		ConfigureContextFunc: providerConfigure,
 	}
 }
 
 type apiClient struct {
-	host   string
-	apiKey string
+	baseURL            string
+	provisioningAPIKey string
 }
 
 func providerConfigure(ctx context.Context, d *schema.ResourceData) (interface{}, diag.Diagnostics) {
-	host := d.Get("host").(string)
-	apiKey := d.Get("api_key").(string)
+	baseURL := d.Get("base_url").(string)
+	provisioningAPIKey := d.Get("provisioning_api_key").(string)
 
 	var diags diag.Diagnostics
 
+	if provisioningAPIKey == "" {
+		diags = append(diags, diag.Diagnostic{
+			Severity: diag.Error,
+			Summary:  "Missing provisioning API key",
+			Detail:   "The provisioning_api_key must be provided",
+		})
+		return nil, diags
+	}
+
 	client := &apiClient{
-		host:   host,
-		apiKey: apiKey,
+		baseURL:            baseURL,
+		provisioningAPIKey: provisioningAPIKey,
 	}
 
 	return client, diags
