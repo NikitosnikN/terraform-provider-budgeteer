@@ -22,9 +22,9 @@ jobs:
           git fetch --tags
           latest_tag=$(git describe --tags `git rev-list --tags --max-count=1` 2>/dev/null || echo "v0.0.0")
           current_commit=$(git rev-parse HEAD)
-          if ! git rev-parse "v1.0.8" >/dev/null 2>&1; then
-            git tag -a "v1.0.8" $current_commit -m "Release v1.0.8"
-            git push origin "v1.0.8"
+          if ! git rev-parse "v1.0.9" >/dev/null 2>&1; then
+            git tag -a "v1.0.9" $current_commit -m "Release v1.0.9"
+            git push origin "v1.0.9"
           fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
