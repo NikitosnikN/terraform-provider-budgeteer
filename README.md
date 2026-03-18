@@ -59,42 +59,62 @@ Manages an OpenRouter API key.
 #### Example Usage
 
 ```hcl
-# Create an API key with a credit limit
+# Create an API key with a monthly credit limit
 resource "openrouter_api_key" "customer_key" {
-  name  = "Customer Instance Key"
-  label = "customer-123"
-  limit = 1000.0
+  name        = "Customer Instance Key"
+  limit       = 100.0
+  limit_reset = "monthly"
+}
+
+# Create an API key with a daily budget and expiry
+resource "openrouter_api_key" "short_lived_key" {
+  name        = "Short-Lived Key"
+  limit       = 10.0
+  limit_reset = "daily"
+  expires_at  = "2026-12-31T23:59:59Z"
 }
 
 # Create an unlimited API key
 resource "openrouter_api_key" "unlimited_key" {
   name = "Development Key"
-  label = "dev-environment"
 }
 
-# Create a disabled API key
-resource "openrouter_api_key" "disabled_key" {
-  name     = "Disabled Key"
-  disabled = true
-  limit    = 50.0
+# Create a key that counts BYOK usage toward the limit
+resource "openrouter_api_key" "byok_key" {
+  name                  = "BYOK Key"
+  limit                 = 500.0
+  limit_reset           = "weekly"
+  include_byok_in_limit = true
 }
 ```
 
 #### Argument Reference
 
-- `name` - (Required) The name of the API key
-- `label` - (Optional) Optional label for the API key
-- `limit` - (Optional) Credit limit for the API key
-- `disabled` - (Optional) Whether the API key is disabled (default: false)
-- `include_byok_in_limit` - (Optional) Whether to include BYOK usage in the limit
+- `name` - (Required) The name of the API key.
+- `limit` - (Optional) Spending limit for the API key in USD. Omit for unlimited.
+- `limit_reset` - (Optional) How often the credit limit resets. Valid values: `daily`, `weekly`, `monthly`. Resets happen at midnight UTC; weeks are Monday–Sunday.
+- `expires_at` - (Optional) ISO 8601 UTC timestamp when the key expires (e.g. `"2026-12-31T23:59:59Z"`). Changing this forces a new resource.
+- `disabled` - (Optional) Whether the API key is disabled. Default: `false`.
+- `include_byok_in_limit` - (Optional) Whether to include BYOK (Bring Your Own Key) usage toward the credit limit.
 
 #### Attribute Reference
 
-- `hash` - The hash identifier of the API key
-- `key_value` - The actual API key value (only available on creation, sensitive)
-- `usage` - Current usage of the API key
-- `created_at` - Creation timestamp
-- `updated_at` - Last update timestamp
+In addition to the arguments above, the following computed attributes are exported:
+
+- `label` - Human-readable label assigned by OpenRouter.
+- `hash` - The unique hash identifier of the API key.
+- `key_value` - The actual API key string. **Only populated on creation and stored in state — never shown again by the API.** Marked sensitive.
+- `limit_remaining` - Remaining credit in USD.
+- `usage` - Total OpenRouter credit usage in USD.
+- `usage_daily` - Credit usage for the current UTC day.
+- `usage_weekly` - Credit usage for the current UTC week (Monday–Sunday).
+- `usage_monthly` - Credit usage for the current UTC month.
+- `byok_usage` - Total external BYOK usage in USD.
+- `byok_usage_daily` - BYOK usage for the current UTC day.
+- `byok_usage_weekly` - BYOK usage for the current UTC week.
+- `byok_usage_monthly` - BYOK usage for the current UTC month.
+- `created_at` - ISO 8601 timestamp of key creation.
+- `updated_at` - ISO 8601 timestamp of last update (null if never updated).
 
 ## Use Cases
 
@@ -106,9 +126,9 @@ Automatically create unique API keys for each customer instance:
 resource "openrouter_api_key" "customer" {
   for_each = var.customers
 
-  name  = "Customer ${each.key}"
-  label = "customer-${each.key}"
-  limit = each.value.credit_limit
+  name        = "Customer ${each.key}"
+  limit       = each.value.credit_limit
+  limit_reset = "monthly"
 }
 
 output "customer_api_keys" {
@@ -126,22 +146,11 @@ Implement automatic key rotation for security compliance:
 ```hcl
 resource "openrouter_api_key" "rotated_key" {
   name  = "Production Key ${formatdate("YYYY-MM", timestamp())}"
-  label = "prod-${formatdate("YYYY-MM", timestamp())}"
   limit = var.production_limit
 
   lifecycle {
     create_before_destroy = true
   }
-}
-
-# Disable old key when new one is created
-resource "openrouter_api_key" "old_key" {
-  count = var.disable_old_key ? 1 : 0
-
-  name     = "Production Key ${formatdate("YYYY-MM", timeadd(timestamp(), "-720h"))}"
-  disabled = true
-
-  depends_on = [openrouter_api_key.rotated_key]
 }
 ```
 
