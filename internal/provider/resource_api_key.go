@@ -24,27 +24,34 @@ type OpenRouterKeyListResponse struct {
 }
 
 type OpenRouterKey struct {
-	CreatedAt          string  `json:"created_at"`
-	UpdatedAt          *string `json:"updated_at"` // Can be null
-	Hash               string  `json:"hash"`
-	Label              string  `json:"label"`
-	Name               string  `json:"name"`
-	Disabled           bool    `json:"disabled"`
-	Limit              float64 `json:"limit"`
-	Usage              float64 `json:"usage"`
-	IncludeByokInLimit *bool   `json:"include_byok_in_limit,omitempty"`
+	CreatedAt          string   `json:"created_at"`
+	UpdatedAt          *string  `json:"updated_at"` // Can be null
+	ExpiresAt          *string  `json:"expires_at"` // Can be null
+	Hash               string   `json:"hash"`
+	Label              string   `json:"label"`
+	Name               string   `json:"name"`
+	Disabled           bool     `json:"disabled"`
+	Limit              *float64 `json:"limit"` // Can be null (unlimited)
+	LimitReset         *string  `json:"limit_reset"` // Can be null
+	Usage              float64  `json:"usage"`
+	IncludeByokInLimit *bool    `json:"include_byok_in_limit,omitempty"`
 }
 
 type CreateKeyRequest struct {
-	Name  string  `json:"name"`
-	Label string  `json:"label,omitempty"`
-	Limit float64 `json:"limit,omitempty"`
+	Name       string   `json:"name"`
+	Label      string   `json:"label,omitempty"`
+	Limit      *float64 `json:"limit,omitempty"`
+	LimitReset string   `json:"limit_reset,omitempty"`
+	ExpiresAt  string   `json:"expires_at,omitempty"`
 }
 
 type UpdateKeyRequest struct {
-	Name               *string `json:"name,omitempty"`
-	Disabled           *bool   `json:"disabled,omitempty"`
-	IncludeByokInLimit *bool   `json:"include_byok_in_limit,omitempty"`
+	Name               *string  `json:"name,omitempty"`
+	Disabled           *bool    `json:"disabled,omitempty"`
+	Limit              *float64 `json:"limit,omitempty"`
+	LimitReset         *string  `json:"limit_reset,omitempty"`
+	ExpiresAt          *string  `json:"expires_at,omitempty"`
+	IncludeByokInLimit *bool    `json:"include_byok_in_limit,omitempty"`
 }
 
 func resourceApiKey() *schema.Resource {
@@ -68,6 +75,16 @@ func resourceApiKey() *schema.Resource {
 				Type:        schema.TypeFloat,
 				Optional:    true,
 				Description: "Credit limit for the API key",
+			},
+			"limit_reset": {
+				Type:        schema.TypeString,
+				Optional:    true,
+				Description: "How often the credit limit resets (e.g., 'hourly', 'daily', 'weekly', 'monthly')",
+			},
+			"expires_at": {
+				Type:        schema.TypeString,
+				Optional:    true,
+				Description: "ISO 8601 timestamp when the API key expires",
 			},
 			"disabled": {
 				Type:        schema.TypeBool,
@@ -123,7 +140,16 @@ func resourceApiKeyCreate(ctx context.Context, d *schema.ResourceData, m interfa
 	}
 
 	if limit, ok := d.GetOk("limit"); ok {
-		createReq.Limit = limit.(float64)
+		v := limit.(float64)
+		createReq.Limit = &v
+	}
+
+	if limitReset, ok := d.GetOk("limit_reset"); ok {
+		createReq.LimitReset = limitReset.(string)
+	}
+
+	if expiresAt, ok := d.GetOk("expires_at"); ok {
+		createReq.ExpiresAt = expiresAt.(string)
 	}
 
 	jsonData, err := json.Marshal(createReq)
@@ -165,12 +191,22 @@ func resourceApiKeyCreate(ctx context.Context, d *schema.ResourceData, m interfa
 	d.Set("name", key.Name)
 	d.Set("label", key.Label)
 	d.Set("disabled", key.Disabled)
-	d.Set("limit", key.Limit)
+	if key.Limit != nil {
+		d.Set("limit", *key.Limit)
+	}
 	d.Set("usage", key.Usage)
 	d.Set("created_at", key.CreatedAt)
 
 	if key.UpdatedAt != nil {
 		d.Set("updated_at", *key.UpdatedAt)
+	}
+
+	if key.ExpiresAt != nil {
+		d.Set("expires_at", *key.ExpiresAt)
+	}
+
+	if key.LimitReset != nil {
+		d.Set("limit_reset", *key.LimitReset)
 	}
 
 	// The key value is only returned on creation and is at the root level
@@ -228,12 +264,22 @@ func resourceApiKeyRead(ctx context.Context, d *schema.ResourceData, m interface
 	d.Set("name", key.Name)
 	d.Set("label", key.Label)
 	d.Set("disabled", key.Disabled)
-	d.Set("limit", key.Limit)
+	if key.Limit != nil {
+		d.Set("limit", *key.Limit)
+	}
 	d.Set("usage", key.Usage)
 	d.Set("created_at", key.CreatedAt)
 
 	if key.UpdatedAt != nil {
 		d.Set("updated_at", *key.UpdatedAt)
+	}
+
+	if key.ExpiresAt != nil {
+		d.Set("expires_at", *key.ExpiresAt)
+	}
+
+	if key.LimitReset != nil {
+		d.Set("limit_reset", *key.LimitReset)
 	}
 
 	if key.IncludeByokInLimit != nil {
@@ -259,6 +305,24 @@ func resourceApiKeyUpdate(ctx context.Context, d *schema.ResourceData, m interfa
 	if d.HasChange("disabled") {
 		disabled := d.Get("disabled").(bool)
 		updateReq.Disabled = &disabled
+		hasChanges = true
+	}
+
+	if d.HasChange("limit") {
+		limit := d.Get("limit").(float64)
+		updateReq.Limit = &limit
+		hasChanges = true
+	}
+
+	if d.HasChange("limit_reset") {
+		limitReset := d.Get("limit_reset").(string)
+		updateReq.LimitReset = &limitReset
+		hasChanges = true
+	}
+
+	if d.HasChange("expires_at") {
+		expiresAt := d.Get("expires_at").(string)
+		updateReq.ExpiresAt = &expiresAt
 		hasChanges = true
 	}
 
